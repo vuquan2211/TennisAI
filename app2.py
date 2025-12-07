@@ -117,7 +117,7 @@ class IpInputDialog(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("InouT - Camera IPs")
-        self.setWindowIcon(QtGui.QIcon(r"C:\SAIT\Capstone\Logo\InouTLogo.png"))
+        self.setWindowIcon(QtGui.QIcon(r"C:\SAIT\TennisAI\Logo\InouTLogo.png"))
         self.setMinimumWidth(520)
 
         form = QtWidgets.QFormLayout()
