@@ -2,10 +2,9 @@
 """
 InouT – 4-Camera Live Viewer (no ffmpeg)
 ---------------------------------------
-• Shows a splash screen with the InouT logo
-• Asks for 4 camera IPs (HTTP / RTSP / files)
-• Displays up to 4 video streams in a 2x2 grid
-• Uses OpenCV + PySide6 (no ffmpeg)
+• Splash screen with InouT logo
+• Camera IP dialog (4 cams)
+• 2x2 live viewer using OpenCV + PySide6
 """
 
 import sys
@@ -13,7 +12,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import cv2
-import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
@@ -44,7 +42,6 @@ class VideoWorker(QtCore.QThread):
                 self.error.emit(self.cam_index, f"[X] Cannot read frame from: {self.source}")
                 break
 
-            # Convert BGR -> RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = frame_rgb.shape
             bytes_per_line = ch * w
@@ -53,9 +50,9 @@ class VideoWorker(QtCore.QThread):
             )
             self.frame_ready.emit(self.cam_index, img)
 
-            # Small sleep so we don’t eat 100% CPU
-            if self._cap.get(cv2.CAP_PROP_FPS) > 0:
-                self.msleep(int(1000 / self._cap.get(cv2.CAP_PROP_FPS)))
+            fps = self._cap.get(cv2.CAP_PROP_FPS)
+            if fps and fps > 0:
+                self.msleep(int(1000 / fps))
             else:
                 self.msleep(15)
 
@@ -75,11 +72,9 @@ class InputDialog(QtWidgets.QDialog):
         self.setWindowTitle("InouT – Camera IPs")
         self.setModal(True)
 
+        layout = QtWidgets.QFormLayout(self)
         self.edits: List[QtWidgets.QLineEdit] = []
 
-        layout = QtWidgets.QFormLayout(self)
-
-        # Default demo values (you can change them)
         defaults = [
             "10.0.0.121:8080",
             "10.0.0.122:8080",
@@ -102,7 +97,6 @@ class InputDialog(QtWidgets.QDialog):
         btn_layout.addStretch(1)
         btn_layout.addWidget(btn_ok)
         btn_layout.addWidget(btn_cancel)
-
         layout.addRow(btn_layout)
 
     def get_urls(self) -> List[str]:
@@ -112,7 +106,6 @@ class InputDialog(QtWidgets.QDialog):
             if txt == "":
                 urls.append("")
             else:
-                # If user only typed IP:port, assume Android IP Webcam style URL
                 if txt.startswith("http://") or txt.startswith("rtsp://"):
                     urls.append(txt)
                 else:
@@ -137,25 +130,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
-
         main_layout = QtWidgets.QVBoxLayout(central)
 
-        # Top control bar
+        # Controls
         ctrl_layout = QtWidgets.QHBoxLayout()
         self.btn_start = QtWidgets.QPushButton("Start", self)
         self.btn_stop = QtWidgets.QPushButton("Stop", self)
         self.btn_stop.setEnabled(False)
-
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_stop)
         ctrl_layout.addStretch(1)
-
         main_layout.addLayout(ctrl_layout)
 
-        # 2x2 grid for cameras
+        # 2x2 grid
         grid = QtWidgets.QGridLayout()
         self.labels: List[QtWidgets.QLabel] = []
-
         for i in range(4):
             lbl = QtWidgets.QLabel(self)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
@@ -164,27 +153,20 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setMinimumSize(320, 180)
             self.labels.append(lbl)
             grid.addWidget(lbl, i // 2, i % 2)
-
         main_layout.addLayout(grid)
 
-        # Status bar
         self.status = self.statusBar()
         self.status.showMessage("Ready")
 
-        # Connections
         self.btn_start.clicked.connect(self.start_streams)
         self.btn_stop.clicked.connect(self.stop_streams)
 
-    # -------------- streaming control --------------
-
     def start_streams(self):
-        self.stop_streams()  # clean up any previous
-
+        self.stop_streams()
         for i, url in enumerate(self.urls):
             if not url:
                 self.labels[i].setText(f"Camera {i + 1}\n(empty URL)")
                 continue
-
             w = VideoWorker(i, url, self)
             w.frame_ready.connect(self.on_frame_ready)
             w.error.connect(self.on_worker_error)
@@ -199,17 +181,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in self.workers:
             w.stop()
         self.workers.clear()
-
-        # Reset labels
         for i, lbl in enumerate(self.labels):
             lbl.setPixmap(QtGui.QPixmap())
             lbl.setText(f"Camera {i + 1}\n(stopped)")
-
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.status.showMessage("Stopped")
-
-    # -------------- slots --------------
 
     @QtCore.Slot(int, QtGui.QImage)
     def on_frame_ready(self, cam_index: int, img: QtGui.QImage):
@@ -231,11 +208,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(msg)
         print(msg)
 
-    # -------------- close event --------------
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+    def closeEvent(self, e: QtGui.QCloseEvent) -> None:
         self.stop_streams()
-        return super().closeEvent(event)
+        return super().closeEvent(e)
 
 
 # ====================== ENTRY POINT ======================
@@ -247,35 +222,43 @@ if __name__ == "__main__":
 
     BASE_DIR = Path(__file__).resolve().parent
     LOGO_PATH = BASE_DIR / "Logo" / "InouTLogo.png"
-
     print("LOGO_PATH =", LOGO_PATH, "exists?", LOGO_PATH.exists())
 
-    # Splash screen
     if LOGO_PATH.exists():
         pix_orig = QtGui.QPixmap(str(LOGO_PATH))
-        if not pix_orig.isNull():
+        print("pix_orig.isNull() =", pix_orig.isNull())
+
+        if pix_orig.isNull():
+            QtWidgets.QMessageBox.warning(
+                None,
+                "Logo error",
+                f"Cannot load logo from:\n{LOGO_PATH}",
+            )
+        else:
             pix = pix_orig.scaled(
-                480,
-                480,
+                480, 480,
                 QtCore.Qt.KeepAspectRatio,
                 QtCore.Qt.SmoothTransformation,
             )
             splash = QtWidgets.QSplashScreen(pix)
             splash.show()
             QtWidgets.QApplication.processEvents()
-            QtCore.QThread.msleep(1200)
+            QtCore.QThread.msleep(2500)  # 2.5 seconds so you can clearly see it
             splash.close()
 
-        # Set window icon for all top-level windows
-        app.setWindowIcon(QtGui.QIcon(str(LOGO_PATH)))
+            app.setWindowIcon(QtGui.QIcon(str(LOGO_PATH)))
+    else:
+        QtWidgets.QMessageBox.warning(
+            None,
+            "Logo not found",
+            f"Logo file not found at:\n{LOGO_PATH}",
+        )
 
-    # Ask for camera URLs
     dlg = InputDialog()
     if dlg.exec() != QtWidgets.QDialog.Accepted:
         sys.exit(0)
 
     urls = dlg.get_urls()
-
     win = MainWindow(urls, LOGO_PATH)
     win.show()
 
