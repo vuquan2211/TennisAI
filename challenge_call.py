@@ -29,21 +29,21 @@ from pathlib import Path
 # ================== PATH CONFIG ==================
 ROOT = Path(r"C:\SAIT\TennisAI")
 
-# Original video (same as DEFAULT_SOURCE in v12)
-DEFAULT_VIDEO       = ROOT / r"input_video\Video3_cut.mp4"
+VIDEO_DIR          = ROOT / "input_video"
+DEFAULT_VIDEO      = VIDEO_DIR / "Video3_cut.mp4"
 
 # 10s challenge clip will be saved here
-CHALLENGE_CLIP_PATH = ROOT / r"input_video\challenge_clip_10s.mp4"
+CHALLENGE_CLIP_PATH = VIDEO_DIR / "challenge_clip_10s.mp4"
 
 # v12 detect script
-V12_SCRIPT          = ROOT / "replay_10s.py"
+V12_SCRIPT = ROOT / "replay_10s.py"
 
 # Calib + minimap (same as in v12)
-CALIB_DIR           = ROOT / "CALIB"
-MINIMAP_PATH        = ROOT / r"Image\TennisCourtMap.jpeg"
+CALIB_DIR    = ROOT / "CALIB"
+MINIMAP_PATH = ROOT / "Image" / "TennisCourtMap.jpeg"
 
 # Output video for the 10s clip
-V12_OUT_PATH        = ROOT / r"outputs\Tennis_minimap_path_v12_challenge.mp4"
+V12_OUT_PATH = ROOT / "outputs" / "Tennis_minimap_path_v12_challenge.mp4"
 
 # ================== UI CONFIG ==================
 WINDOW_NAME = "Tennis Video (C=Challenge, Space=Play/Pause, Q=Quit)"
@@ -55,7 +55,7 @@ SCALE       = 0.5  # 0.5 = half size, 1.0 = full size
 def save_clip_from_frames(frames, fps, out_path: Path) -> bool:
     """Save a list of BGR frames as an mp4 clip."""
     if not frames:
-        print("[⚠] No frames to save for 10s clip.")
+        print("[WARN] No frames to save for 10s clip.")
         return False
 
     h, w = frames[0].shape[:2]
@@ -63,28 +63,28 @@ def save_clip_from_frames(frames, fps, out_path: Path) -> bool:
     writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
 
     if not writer.isOpened():
-        print(f"[❌] Cannot open VideoWriter for: {out_path}")
+        print(f"[ERROR] Cannot open VideoWriter for: {out_path}")
         return False
 
     for f in frames:
         writer.write(f)
 
     writer.release()
-    print(f"[💾] Saved 10s clip to: {out_path}")
+    print(f"[SAVE] Saved 10s clip to: {out_path}")
     return True
 
 
 def call_detect_v12_on_clip(clip_path: Path):
     """Call replay_10s.py on the saved 10s clip."""
     if not clip_path.is_file():
-        print(f"[⚠] Clip not found for detect: {clip_path}")
+        print(f"[WARN] Clip not found for detect: {clip_path}")
         return
 
     if not V12_SCRIPT.is_file():
-        print(f"[⚠] v12 script not found: {V12_SCRIPT}")
+        print(f"[WARN] v12 script not found: {V12_SCRIPT}")
         return
 
-    print(f"[🎯] Running replay_10s on clip: {clip_path}")
+    print(f"[INFO] Running replay_10s on clip: {clip_path}")
 
     cmd = [
         sys.executable,
@@ -98,7 +98,7 @@ def call_detect_v12_on_clip(clip_path: Path):
     ]
 
     subprocess.run(cmd)
-    print("[✅] replay_10s finished on 10s clip.")
+    print("[INFO] replay_10s finished on 10s clip.")
 
 
 # =============== MAIN LOOP ===============
@@ -106,17 +106,17 @@ def call_detect_v12_on_clip(clip_path: Path):
 def main(video_path: Path = DEFAULT_VIDEO):
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"[❌] Cannot open video: {video_path}")
+        print(f"[ERROR] Cannot open video: {video_path}")
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
-        print("[⚠] Cannot read FPS, fallback to 30fps.")
+        print("[WARN] Cannot read FPS, fallback to 30fps.")
         fps = 30.0
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total_frames <= 0:
-        print("[⚠] Cannot read total frame count; timeline may be inaccurate.")
+        print("[WARN] Cannot read total frame count; timeline may be inaccurate.")
         total_frames = 1
 
     max_frames = int(fps * 10)  # last 10 seconds
@@ -146,7 +146,7 @@ def main(video_path: Path = DEFAULT_VIDEO):
         on_trackbar
     )
 
-    print("[▶] Start playing video.")
+    print("[INFO] Start playing video.")
     print("[Keys]")
     print("  Space  - Play/Pause")
     print("  ← / →  - Step 1 frame (when paused)")
@@ -158,7 +158,7 @@ def main(video_path: Path = DEFAULT_VIDEO):
     while True:
         # ====== handle window close (click X) ======
         if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-            print("[👋] Window closed. Exiting.")
+            print("[INFO] Window closed. Exiting.")
             break
 
         # ====== handle seek (timeline drag) ======
@@ -169,7 +169,7 @@ def main(video_path: Path = DEFAULT_VIDEO):
 
             ret, frame = cap.read()
             if not ret:
-                print("[⚠] Failed to read frame after seek.")
+                print("[WARN] Failed to read frame after seek.")
                 break
 
             frame_buffer.append(frame.copy())
@@ -188,7 +188,7 @@ def main(video_path: Path = DEFAULT_VIDEO):
             if not is_paused:
                 ret, frame = cap.read()
                 if not ret:
-                    print("[⏹] End of video.")
+                    print("[INFO] End of video.")
                     break
                 frame_buffer.append(frame.copy())
                 last_frame = frame.copy()
@@ -196,13 +196,13 @@ def main(video_path: Path = DEFAULT_VIDEO):
                 if last_frame is None:
                     ret, frame = cap.read()
                     if not ret:
-                        print("[⏹] End of video.")
+                        print("[INFO] End of video.")
                         break
                     frame_buffer.append(frame.copy())
                     last_frame = frame.copy()
                 frame = last_frame
 
-        # ====== display frame ======
+        # ====== display frame ====== 
         if SCALE != 1.0:
             display = cv2.resize(
                 frame,
@@ -228,14 +228,14 @@ def main(video_path: Path = DEFAULT_VIDEO):
         key = cv2.waitKey(9) & 0xFF
 
         if key in (ord("q"), 27):  # Q or ESC
-            print("[👋] Quit by key.")
+            print("[INFO] Quit by key.")
             break
 
         if key == ord(" "):  # Space: Play / Pause
             is_paused = not is_paused
 
         if key in (ord("c"), ord("C")):
-            print("[⏳] Processing 10s challenge clip ...")
+            print("[INFO] Processing 10s challenge clip ...")
             frames_for_clip = list(frame_buffer)
             ok = save_clip_from_frames(frames_for_clip, fps, CHALLENGE_CLIP_PATH)
             if ok:
