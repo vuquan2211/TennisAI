@@ -1,301 +1,262 @@
 # -*- coding: utf-8 -*-
 """
-InouT – 4-Camera Live Viewer (no ffmpeg) + 10s Challenge on Cam A
+InouT – 4-Camera Live Viewer (no ffmpeg)
+---------------------------------------
+• Shows a splash screen with the InouT logo
+• Asks for 4 camera IPs (HTTP / RTSP / files)
+• Displays up to 4 video streams in a 2x2 grid
+• Uses OpenCV + PySide6 (no ffmpeg)
 """
 
-import os
 import sys
-import time
-import cv2
-import subprocess as sp
-from collections import deque
 from pathlib import Path
+from typing import List, Optional
 
+import cv2
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-# ===================== CONFIG =====================
+# ====================== Worker Thread ======================
 
-ROOT = Path(r"C:\SAIT\TennisAI")
-OUTPUT_DIR = ROOT / "input_video"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+class VideoWorker(QtCore.QThread):
+    frame_ready = QtCore.Signal(int, QtGui.QImage)
+    error = QtCore.Signal(int, str)
 
-CHALLENGE_CLIP = OUTPUT_DIR / "challenge_clip_10s.mp4"
-REPLAY_SCRIPT = ROOT / "replay_10s.py"   # optional, can be missing
-
-BUFFER_SEC = 10
-TARGET_FPS = 30.0   # used for saving challenge clip
-
-# ===================== CAPTURE WORKER =====================
-
-class CaptureWorker(QtCore.QThread):
-    frame_ready = QtCore.Signal(int, object)  # cam_idx, frame (RGB)
-
-    def __init__(self, cam_idx: int, url: str, parent=None):
+    def __init__(self, cam_index: int, source: str, parent=None):
         super().__init__(parent)
-        self.cam_idx = cam_idx
-        self.url = url
-        self.cap = None
-        self.running = False
-
-        max_frames = int(BUFFER_SEC * TARGET_FPS)
-        # For Cam A (index 0) we keep full buffer, others just small
-        if cam_idx == 0:
-            self.buffer = deque(maxlen=max_frames)
-        else:
-            self.buffer = deque(maxlen=int(TARGET_FPS * 2))  # 2s buffer just in case
+        self.cam_index = cam_index
+        self.source = source
+        self._running = False
+        self._cap: Optional[cv2.VideoCapture] = None
 
     def run(self):
-        self.running = True
-        self.cap = cv2.VideoCapture(self.url)
+        self._running = True
+        self._cap = cv2.VideoCapture(self.source)
 
-        if not self.cap.isOpened():
-            print(f"[CaptureWorker] Cannot open camera {self.cam_idx}: {self.url}")
+        if not self._cap.isOpened():
+            self.error.emit(self.cam_index, f"[X] Cannot open video: {self.source}")
             return
 
-        # Try to reduce latency a bit
-        try:
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
+        while self._running:
+            ok, frame = self._cap.read()
+            if not ok:
+                self.error.emit(self.cam_index, f"[X] Cannot read frame from: {self.source}")
+                break
 
-        while self.running:
-            ok, frame = self.cap.read()
-            if not ok or frame is None:
-                self.msleep(10)
-                continue
+            # Convert BGR -> RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            bytes_per_line = ch * w
+            img = QtGui.QImage(
+                frame_rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888
+            )
+            self.frame_ready.emit(self.cam_index, img)
 
-            if self.cam_idx == 0:
-                # Keep full-resolution copy in buffer for challenge
-                self.buffer.append(frame.copy())
+            # Small sleep so we don’t eat 100% CPU
+            if self._cap.get(cv2.CAP_PROP_FPS) > 0:
+                self.msleep(int(1000 / self._cap.get(cv2.CAP_PROP_FPS)))
+            else:
+                self.msleep(15)
 
-            # Convert to RGB for display
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self.frame_ready.emit(self.cam_idx, rgb)
-
-        if self.cap:
-            self.cap.release()
+        if self._cap is not None:
+            self._cap.release()
 
     def stop(self):
-        self.running = False
+        self._running = False
         self.wait(500)
 
-    def get_buffer_copy(self):
-        # Shallow copy for challenge saving
-        return list(self.buffer)
 
+# ====================== Camera IP Dialog ======================
 
-# ===================== UI WIDGETS =====================
+class InputDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("InouT – Camera IPs")
+        self.setModal(True)
 
-class VideoTile(QtWidgets.QLabel):
-    def __init__(self, title="Cam"):
-        super().__init__()
-        self.setMinimumSize(360, 200)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setText(f"{title}\nWaiting video…")
-        self.setStyleSheet(
-            "background:#101010; color:#e0e0e0; "
-            "border:1px solid #333; border-radius:8px;"
-        )
+        self.edits: List[QtWidgets.QLineEdit] = []
 
-    def set_frame(self, frame):
-        if frame is None:
-            return
-        h, w, ch = frame.shape
-        qimg = QtGui.QImage(frame.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
-        pix = QtGui.QPixmap.fromImage(qimg)
-        self.setPixmap(
-            pix.scaled(
-                self.size(),
-                QtCore.Qt.KeepAspectRatio,
-                QtCore.Qt.SmoothTransformation,
-            )
-        )
+        layout = QtWidgets.QFormLayout(self)
 
-
-class IpInputDialog(QtWidgets.QDialog):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("InouT - Camera IPs")
-        self.setWindowIcon(QtGui.QIcon(r"C:\SAIT\Capstone\Logo\InouTLogo.png"))
-        self.setMinimumWidth(520)
-
-        form = QtWidgets.QFormLayout()
-        placeholders = [
+        # Default demo values (you can change them)
+        defaults = [
             "10.0.0.121:8080",
             "10.0.0.122:8080",
             "10.0.0.123:8080",
             "10.0.0.124:8080",
         ]
-        self.edits = []
+
         for i in range(4):
-            edit = QtWidgets.QLineEdit()
-            edit.setPlaceholderText(placeholders[i])
-            form.addRow(f"Camera {i+1}", edit)
+            edit = QtWidgets.QLineEdit(self)
+            edit.setPlaceholderText(defaults[i])
+            layout.addRow(f"Camera {i + 1}", edit)
             self.edits.append(edit)
 
-        btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
+        btn_ok = QtWidgets.QPushButton("OK", self)
+        btn_cancel = QtWidgets.QPushButton("Cancel", self)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
 
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.addLayout(form)
-        lay.addWidget(btns)
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
 
-    def _normalize(self, v: str):
-        v = (v or "").strip()
-        if not v:
-            return None
-        low = v.lower()
-        if low.startswith(("http://", "https://", "rtsp://")):
-            return v
-        if v.isdigit():
-            return f"http://127.0.0.1:{v}/video"
-        if ":" in v:
-            return f"http://{v}/video"
-        return f"http://{v}:8080/video"
+        layout.addRow(btn_layout)
 
-    def get_urls(self):
-        urls = []
-        for e in self.edits:
-            raw = e.text().strip() or e.placeholderText()
-            urls.append(self._normalize(raw))
+    def get_urls(self) -> List[str]:
+        urls: List[str] = []
+        for edit in self.edits:
+            txt = edit.text().strip()
+            if txt == "":
+                urls.append("")
+            else:
+                # If user only typed IP:port, assume Android IP Webcam style URL
+                if txt.startswith("http://") or txt.startswith("rtsp://"):
+                    urls.append(txt)
+                else:
+                    urls.append(f"http://{txt}/video")
         return urls
 
 
-# ===================== CHALLENGE SAVER =====================
-
-class ChallengeSaver(QtCore.QThread):
-    finished_ok = QtCore.Signal(bool, str)  # ok, message
-
-    def __init__(self, frames, parent=None):
-        super().__init__(parent)
-        self.frames = frames
-
-    def run(self):
-        if not self.frames:
-            self.finished_ok.emit(False, "No frames buffered yet for Cam A.")
-            return
-
-        h, w = self.frames[0].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(CHALLENGE_CLIP), fourcc, TARGET_FPS, (w, h))
-
-        if not writer.isOpened():
-            self.finished_ok.emit(False, "Cannot open VideoWriter for challenge clip.")
-            return
-
-        for f in self.frames:
-            writer.write(f)
-        writer.release()
-
-        self.finished_ok.emit(True, f"Saved last 10s of Cam A to: {CHALLENGE_CLIP}")
-
-
-# ===================== MAIN WINDOW =====================
+# ====================== Main Window ======================
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, urls):
-        super().__init__()
-        self.setWindowTitle("TennisInouT - 4Cam Live (no ffmpeg) + 10s Challenge")
-        self.setWindowIcon(QtGui.QIcon(r"C:\SAIT\Capstone\Logo\InouTLogo.png"))
-        self.resize(1280, 780)
+    def __init__(self, urls: List[str], logo_path: Path, parent=None):
+        super().__init__(parent)
 
-        cw = QtWidgets.QWidget()
-        grid = QtWidgets.QGridLayout(cw)
-        self.setCentralWidget(cw)
+        self.setWindowTitle("InouT – 4-Cam Live (no ffmpeg)")
+        self.resize(1280, 720)
 
-        self.tiles = [VideoTile(f"Cam {chr(65+i)}") for i in range(4)]
-        grid.addWidget(self.tiles[0], 0, 0)
-        grid.addWidget(self.tiles[1], 0, 1)
-        grid.addWidget(self.tiles[2], 1, 0)
-        grid.addWidget(self.tiles[3], 1, 1)
+        if logo_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(logo_path)))
 
-        self.statusBar().showMessage("Ready")
+        self.urls = urls
+        self.workers: List[VideoWorker] = []
 
-        tb = self.addToolBar("Controls")
+        central = QtWidgets.QWidget(self)
+        self.setCentralWidget(central)
 
-        self.actChallenge = QtGui.QAction("Challenge (save last 10s of Cam A)", self)
-        self.actChallenge.triggered.connect(self.on_challenge)
+        main_layout = QtWidgets.QVBoxLayout(central)
 
-        self.actQuit = QtGui.QAction("Quit", self)
-        self.actQuit.triggered.connect(self.close)
+        # Top control bar
+        ctrl_layout = QtWidgets.QHBoxLayout()
+        self.btn_start = QtWidgets.QPushButton("Start", self)
+        self.btn_stop = QtWidgets.QPushButton("Stop", self)
+        self.btn_stop.setEnabled(False)
 
-        tb.addAction(self.actChallenge)
-        tb.addSeparator()
-        tb.addAction(self.actQuit)
+        ctrl_layout.addWidget(self.btn_start)
+        ctrl_layout.addWidget(self.btn_stop)
+        ctrl_layout.addStretch(1)
 
-        self.workers: list[CaptureWorker] = []
+        main_layout.addLayout(ctrl_layout)
+
+        # 2x2 grid for cameras
+        grid = QtWidgets.QGridLayout()
+        self.labels: List[QtWidgets.QLabel] = []
 
         for i in range(4):
-            w = CaptureWorker(i, urls[i])
-            w.frame_ready.connect(self.on_frame)
-            w.start()
+            lbl = QtWidgets.QLabel(self)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setStyleSheet("background-color: #202020; color: #AAAAAA;")
+            lbl.setText(f"Camera {i + 1}\n(no signal)")
+            lbl.setMinimumSize(320, 180)
+            self.labels.append(lbl)
+            grid.addWidget(lbl, i // 2, i % 2)
+
+        main_layout.addLayout(grid)
+
+        # Status bar
+        self.status = self.statusBar()
+        self.status.showMessage("Ready")
+
+        # Connections
+        self.btn_start.clicked.connect(self.start_streams)
+        self.btn_stop.clicked.connect(self.stop_streams)
+
+    # -------------- streaming control --------------
+
+    def start_streams(self):
+        self.stop_streams()  # clean up any previous
+
+        for i, url in enumerate(self.urls):
+            if not url:
+                self.labels[i].setText(f"Camera {i + 1}\n(empty URL)")
+                continue
+
+            w = VideoWorker(i, url, self)
+            w.frame_ready.connect(self.on_frame_ready)
+            w.error.connect(self.on_worker_error)
             self.workers.append(w)
+            w.start()
 
-        self.statusBar().showMessage("Live preview running (Cam A has 10s buffer for challenge).")
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.status.showMessage("Streaming...")
 
-    @QtCore.Slot(int, object)
-    def on_frame(self, cam_idx, frame):
-        if 0 <= cam_idx < len(self.tiles):
-            self.tiles[cam_idx].set_frame(frame)
-
-    def on_challenge(self):
-        cam_a = self.workers[0] if self.workers else None
-        if not cam_a:
-            self.statusBar().showMessage("Cam A not ready.")
-            return
-
-        frames = cam_a.get_buffer_copy()
-        self.statusBar().showMessage("Saving last 10s of Cam A...")
-        self.actChallenge.setEnabled(False)
-
-        self.saver = ChallengeSaver(frames)
-        self.saver.finished_ok.connect(self.on_challenge_done)
-        self.saver.start()
-
-    @QtCore.Slot(bool, str)
-    def on_challenge_done(self, ok: bool, msg: str):
-        self.actChallenge.setEnabled(True)
-        self.statusBar().showMessage(msg, 5000)
-
-        if ok and REPLAY_SCRIPT.is_file():
-            try:
-                cmd = [
-                    sys.executable,
-                    str(REPLAY_SCRIPT),
-                    "--source",
-                    str(CHALLENGE_CLIP),
-                ]
-                sp.Popen(cmd)
-            except Exception as e:
-                self.statusBar().showMessage(f"Replay script error: {e}", 5000)
-
-    def closeEvent(self, e):
+    def stop_streams(self):
         for w in self.workers:
             w.stop()
-        return super().closeEvent(e)
+        self.workers.clear()
+
+        # Reset labels
+        for i, lbl in enumerate(self.labels):
+            lbl.setPixmap(QtGui.QPixmap())
+            lbl.setText(f"Camera {i + 1}\n(stopped)")
+
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.status.showMessage("Stopped")
+
+    # -------------- slots --------------
+
+    @QtCore.Slot(int, QtGui.QImage)
+    def on_frame_ready(self, cam_index: int, img: QtGui.QImage):
+        if 0 <= cam_index < len(self.labels):
+            pix = QtGui.QPixmap.fromImage(img)
+            self.labels[cam_index].setPixmap(
+                pix.scaled(
+                    self.labels[cam_index].size(),
+                    QtCore.Qt.KeepAspectRatio,
+                    QtCore.Qt.SmoothTransformation,
+                )
+            )
+
+    @QtCore.Slot(int, str)
+    def on_worker_error(self, cam_index: int, msg: str):
+        if 0 <= cam_index < len(self.labels):
+            self.labels[cam_index].setPixmap(QtGui.QPixmap())
+            self.labels[cam_index].setText(f"Camera {cam_index + 1}\nError")
+        self.status.showMessage(msg)
+        print(msg)
+
+    # -------------- close event --------------
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.stop_streams()
+        return super().closeEvent(event)
 
 
-# ===================== ENTRY POINT =====================
+# ====================== ENTRY POINT ======================
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     app.setOrganizationName("InouT")
-    app.setApplicationName("TennisInouT - 4Cam Live (no ffmpeg)")
+    app.setApplicationName("TennisInouT – 4-Cam Live (no ffmpeg)")
 
     BASE_DIR = Path(__file__).resolve().parent
     LOGO_PATH = BASE_DIR / "Logo" / "InouTLogo.png"
 
     print("LOGO_PATH =", LOGO_PATH, "exists?", LOGO_PATH.exists())
-    
-    if Path(LOGO_PATH).exists():
-        pix_orig = QtGui.QPixmap(LOGO_PATH)
+
+    # Splash screen
+    if LOGO_PATH.exists():
+        pix_orig = QtGui.QPixmap(str(LOGO_PATH))
         if not pix_orig.isNull():
             pix = pix_orig.scaled(
-                480, 480,
+                480,
+                480,
                 QtCore.Qt.KeepAspectRatio,
                 QtCore.Qt.SmoothTransformation,
             )
@@ -305,11 +266,17 @@ if __name__ == "__main__":
             QtCore.QThread.msleep(1200)
             splash.close()
 
-    dlg = IpInputDialog()
-    if dlg.exec() == QtWidgets.QDialog.Accepted:
-        urls = dlg.get_urls()
-        win = MainWindow(urls)
-        win.show()
-        sys.exit(app.exec())
-    else:
+        # Set window icon for all top-level windows
+        app.setWindowIcon(QtGui.QIcon(str(LOGO_PATH)))
+
+    # Ask for camera URLs
+    dlg = InputDialog()
+    if dlg.exec() != QtWidgets.QDialog.Accepted:
         sys.exit(0)
+
+    urls = dlg.get_urls()
+
+    win = MainWindow(urls, LOGO_PATH)
+    win.show()
+
+    sys.exit(app.exec())
