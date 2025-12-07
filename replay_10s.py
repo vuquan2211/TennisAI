@@ -102,7 +102,7 @@ WHITE = (255,255,255)
 BLACK = (0,   0,   0)
 
 # ===================== InouT LOGO (replay only) =====================
-LOGO_PATH          = Path(r"C:\SAIT\Capstone\Logo\InouTLogo.png")
+LOGO_PATH          = Path(r"C:\SAIT\TennisAI\Logo\InouTLogo.png")
 LOGO_REL_HEIGHT    = 0.08   # logo height ~8% of video height
 LOGO_MARGIN_RIGHT  = 90
 LOGO_MARGIN_BOTTOM = 90
